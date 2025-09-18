@@ -4,7 +4,8 @@ on:
   workflow_dispatch: {}
   push:
     paths:
-      - .github/workflows/build-tesseract.yml
+      # Update this to match the ACTUAL filename of this workflow:
+      - .github/workflows/build-tesseract-static.yml
 
 jobs:
   build:
@@ -50,8 +51,10 @@ jobs:
           # Output
           RUN mkdir -p /out && cp /usr/local/bin/tesseract /out/tesseract
 
-          FROM scratch AS export
+          # ---- Export stage must be runnable for `docker create` ----
+          FROM alpine:3.20 AS export
           COPY --from=build /out/tesseract /tesseract
+          ENTRYPOINT ["/bin/true"]
           EOF
 
       - name: Build (plain logs)
@@ -69,7 +72,6 @@ jobs:
       - name: Verify static-ness
         run: |
           file ./tesseract || true
-          # ldd SHOULD fail for a truly static binary (no shared libs)
           (ldd ./tesseract && exit 1) || echo "ldd failed as expected for a static binary"
 
       - name: Upload artifact
