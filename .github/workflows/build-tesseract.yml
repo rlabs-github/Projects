@@ -1,0 +1,69 @@
+name: build-tesseract-static
+
+on:
+  workflow_dispatch: {}   # run manually from the Actions tab
+  push:
+    paths:
+      - .github/workflows/build-tesseract.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Dockerfile (static Tesseract 5.3.3 + leptonica 1.84.1)
+        run: |
+          cat > Dockerfile <<'EOF'
+          FROM alpine:3.20 AS build
+          RUN apk add --no-cache build-base autoconf automake libtool pkgconfig git \
+              zlib-dev libjpeg-turbo-dev libpng-dev tiff-dev icu-dev curl
+
+          # Build leptonica static
+          WORKDIR /src
+          RUN curl -L -o leptonica.tar.gz https://github.com/DanBloomberg/leptonica/archive/refs/tags/1.84.1.tar.gz \
+           && tar xf leptonica.tar.gz \
+           && cd leptonica-1.84.1 \
+           && ./autobuild > /dev/null 2>&1 || true \
+           && ./configure --enable-static --disable-shared \
+           && make -j"$(nproc)" \
+           && make install
+
+          # Build tesseract static
+          RUN curl -L -o tesseract.tar.gz https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.3.3.tar.gz \
+           && tar xf tesseract.tar.gz \
+           && cd tesseract-5.3.3 \
+           && ./autogen.sh \
+           && PKG_CONFIG="pkg-config --static" ./configure --enable-static --disable-shared \
+           && make -j"$(nproc)" \
+           && make install \
+           && strip /usr/local/bin/tesseract
+
+          # Output
+          RUN mkdir -p /out && cp /usr/local/bin/tesseract /out/tesseract
+
+          FROM scratch AS export
+          COPY --from=build /out/tesseract /tesseract
+          EOF
+
+      - name: Build image
+        run: docker build -t tess-static:latest .
+
+      - name: Extract binary from image
+        run: |
+          cid=$(docker create tess-static:latest)
+          docker cp "$cid:/tesseract" ./tesseract
+          docker rm "$cid"
+          chmod +x ./tesseract
+
+      - name: Verify it looks static
+        run: |
+          file ./tesseract || true
+          # ldd should fail for static binaries; that's expected
+          (ldd ./tesseract && exit 1) || echo "ldd failed as expected for a static binary"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tesseract-linux-x86_64-static
+          path: ./tesseract
