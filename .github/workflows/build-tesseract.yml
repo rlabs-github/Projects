@@ -1,7 +1,7 @@
 name: build-tesseract-static
 
 on:
-  workflow_dispatch: {}   # run manually from the Actions tab
+  workflow_dispatch: {}
   push:
     paths:
       - .github/workflows/build-tesseract.yml
@@ -12,32 +12,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create Dockerfile (static Tesseract 5.3.3 + leptonica 1.84.1)
+      - name: Write Dockerfile (Alpine + static build)
         run: |
           cat > Dockerfile <<'EOF'
           FROM alpine:3.20 AS build
-          RUN apk add --no-cache build-base autoconf automake libtool pkgconfig git \
+
+          # Toolchain + deps
+          RUN apk add --no-cache \
+              build-base autoconf automake libtool pkgconfig bash coreutils \
               zlib-dev libjpeg-turbo-dev libpng-dev tiff-dev icu-dev curl
 
-          # Build leptonica static
           WORKDIR /src
-          RUN curl -L -o leptonica.tar.gz https://github.com/DanBloomberg/leptonica/archive/refs/tags/1.84.1.tar.gz \
-           && tar xf leptonica.tar.gz \
-           && cd leptonica-1.84.1 \
-           && ./autobuild > /dev/null 2>&1 || true \
-           && ./configure --enable-static --disable-shared \
-           && make -j"$(nproc)" \
-           && make install
 
-          # Build tesseract static
-          RUN curl -L -o tesseract.tar.gz https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.3.3.tar.gz \
-           && tar xf tesseract.tar.gz \
-           && cd tesseract-5.3.3 \
-           && ./autogen.sh \
-           && PKG_CONFIG="pkg-config --static" ./configure --enable-static --disable-shared \
-           && make -j"$(nproc)" \
-           && make install \
-           && strip /usr/local/bin/tesseract
+          # -------- Build Leptonica (static) --------
+          ENV LEPT_VER=1.84.1
+          RUN curl -L -o leptonica.tar.gz \
+                https://github.com/DanBloomberg/leptonica/archive/refs/tags/${LEPT_VER}.tar.gz \
+              && tar xf leptonica.tar.gz \
+              && cd leptonica-${LEPT_VER} \
+              && ( [ -x ./autogen.sh ] && ./autogen.sh || autoreconf -fi ) \
+              && ./configure --enable-static --disable-shared \
+              && make -j"$(nproc)" \
+              && make install
+
+          # -------- Build Tesseract (static) --------
+          ENV TESS_VER=5.3.3
+          RUN curl -L -o tesseract.tar.gz \
+                https://github.com/tesseract-ocr/tesseract/archive/refs/tags/${TESS_VER}.tar.gz \
+              && tar xf tesseract.tar.gz \
+              && cd tesseract-${TESS_VER} \
+              && ./autogen.sh \
+              && PKG_CONFIG="pkg-config --static" ./configure --enable-static --disable-shared \
+              && make -j"$(nproc)" \
+              && make install \
+              && strip /usr/local/bin/tesseract
 
           # Output
           RUN mkdir -p /out && cp /usr/local/bin/tesseract /out/tesseract
@@ -46,20 +54,22 @@ jobs:
           COPY --from=build /out/tesseract /tesseract
           EOF
 
-      - name: Build image
-        run: docker build -t tess-static:latest .
+      - name: Build (plain logs)
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build --progress=plain -t tess-static:latest .
 
-      - name: Extract binary from image
+      - name: Extract binary
         run: |
           cid=$(docker create tess-static:latest)
           docker cp "$cid:/tesseract" ./tesseract
           docker rm "$cid"
           chmod +x ./tesseract
 
-      - name: Verify it looks static
+      - name: Verify static-ness
         run: |
           file ./tesseract || true
-          # ldd should fail for static binaries; that's expected
+          # ldd SHOULD fail for a truly static binary (no shared libs)
           (ldd ./tesseract && exit 1) || echo "ldd failed as expected for a static binary"
 
       - name: Upload artifact
